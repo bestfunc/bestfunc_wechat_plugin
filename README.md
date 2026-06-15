@@ -1,36 +1,53 @@
 # bestfunc_wechat_plugin
 
-微信聊天记录平台的 **MCP Server + 配套 SKILL**，让 AI 客户端（Claude 等）基于**用户 OAuth 认证**、按该用户**可访问的微信群范围**只读地获取聊天数据。
+微信聊天记录平台的 **Claude Code 插件**（marketplace 形态，参考 Argus_Plugins 规范）：基于**用户 OAuth 授权**，只读访问当前用户「有权限的微信群」的聊天/人员/附件/群信息。
 
-> 数据与权限来源平台：`wxdevops-task-admin`（同级项目）。本项目是独立的对外读取层。
+> 数据与权限来源平台：`wxdevops-task-admin`（同级项目）。本仓库 = 插件包 + 背后的 MCP Server。
 
-## 需求（本期）
-- 开放 MCP，基于**用户 OAuth 认证**。
-- **权限等同用户**：系统里"用户可访问哪些微信群"的权限，决定 MCP 能访问哪些群（OAuth 认证关系）。
-- 通过 MCP 读取可访问群内：**所有聊天消息、人员信息、附件（图片/视频等）**。
-- 通过 MCP 读取**群相关信息**，包括备注等额外维护的信息（群备注/项目编号/项目名称/内外部/密级）。
-- 配套 **SKILL**，用于该 Plugin 的使用。
-- **只读**：本期不通过 MCP 发送任何微信内容。
+## 能力（只读）
+- 读可访问群的聊天消息、人员信息、附件（图片/视频/文件）。
+- 读群额外维护信息：备注、项目编号/名称、内外部、权限等级(密级)。
+- 权限等同用户：MCP 可见群范围 = 该用户在系统里的群权限（OAuth 邮箱身份）。
+- **不发送**任何微信内容。
 
-## 角色边界
-- **认证(authN)**：用户是谁 —— OAuth（待定：复用 wxdevops 邮箱登录 / 巅峰表现 token）。
-- **授权(authZ)**：能看哪些群 —— 来自 wxdevops-task-admin 的群权限模型：
-  - 全局 `groups_manage` → 全部群；
-  - 群管理员（邮箱）→ 其负责的群。
-- 群密级 `access_level` 作为 AI 可见范围的附加约束（可设上限）。
-
-## 架构（待确认，见 docs/architecture.md）
-关键岔路：
-1. **数据来源**：MCP 直连 wxdevops MySQL，还是调用 wxdevops HTTP API（推荐 API，边界清晰）。
-2. **身份/OAuth**：用户 token 怎么来、怎么映射到 wxdevops 的邮箱权限（油猴已同步 `~/.config/bestfunc-mcp/credentials.json`，但那是巅峰表现 token）。
-3. **传输形态**：本地 stdio（Claude Desktop，读同步 token）/ 远程 HTTP（标准 OAuth2.1）。
-
-## 目录
+## 仓库结构
 ```
-src/bestfunc_wechat_mcp/   MCP server 实现
-skill/                     配套 SKILL（Plugin 使用说明/封装）
-docs/                      需求与架构文档
+.claude-plugin/marketplace.json        插件市场清单
+plugins/wechat/
+  .claude-plugin/plugin.json           插件清单（mcpServers 声明远程 http MCP）
+  skills/
+    wechat-chat-reader/SKILL.md        查询用法
+    mcp-authorization/SKILL.md         OAuth 授权说明
+src/bestfunc_wechat_mcp/               MCP Server 实现（远程 Streamable HTTP + OAuth 资源服务器）
+docs/architecture.md                   架构与决策
 ```
+
+## 安装（Claude Code）
+```
+/plugin marketplace add bestfunc/bestfunc_wechat_plugin
+/plugin install wechat@bestfunc-wechat-plugins
+```
+首次调用工具时按 `mcp-authorization` 用 wxdevops 邮箱完成 OAuth 登录。
+
+## MCP 工具（mcp__wechat__*，均只读）
+`list_groups` · `get_group` · `get_messages` · `search_messages` · `get_members` · `get_group_attachments` · `get_attachment`
+
+## 部署 MCP Server（src/）
+插件 `plugin.json` 的 `mcpServers.wechat.url` 指向已部署的 MCP Server，需先部署：
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+WXDEVOPS_API_BASE=https://<wxdevops-host> \
+AUTH_SERVER_URL=https://<wxdevops-host> \
+MCP_RESOURCE_URL=https://wechat-mcp.bestfunc.com \
+MCP_PORT=8088 PYTHONPATH=src .venv/bin/python -m bestfunc_wechat_mcp
+```
+- `WXDEVOPS_API_BASE`：wxdevops 后端地址（提供 `/api/mcp-data/*` 数据接口与 `/oauth` 授权服务器）。
+- 部署后把公网地址（如 `https://wechat-mcp.bestfunc.com/mcp`）填回 `plugin.json` 的 `mcpServers.wechat.url`。
+- 鉴权：MCP Server 校验 Bearer 令牌（调 wxdevops `/api/mcp-data/me`），并暴露 `/.well-known/oauth-protected-resource` 指向 wxdevops OAuth AS。
+
+## 依赖的 wxdevops 后端接口（已实现于 wxdevops-task-admin）
+- OAuth AS：`/.well-known/oauth-authorization-server`、`/api/oauth/authorize|token|register`
+- 只读数据：`/api/mcp-data/groups|search|me`、`/groups/{room_id}/messages|members|attachments`、`/attachments/{id}`
 
 ## 状态
-🚧 初始化。架构决策确认后开始实现（见 docs/）。
+P1 数据API · P2 OAuth · P3 MCP Server · P4 插件/SKILL 已完成并本地端到端验证通过。`mcpServers.url` 为占位的生产域名，部署后需更新。

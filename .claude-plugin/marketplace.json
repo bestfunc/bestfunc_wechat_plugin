@@ -1,0 +1,18 @@
+{
+  "name": "bestfunc-wechat-plugins",
+  "owner": {
+    "name": "Bestfunc Technology",
+    "email": "Great@bestfunc.com"
+  },
+  "metadata": {
+    "description": "Bestfunc 微信聊天记录平台的 Claude Code plugin 市场。",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "wechat",
+      "source": "./plugins/wechat",
+      "description": "微信聊天记录只读接入：按用户 OAuth 授权读取可访问群的聊天/人员/附件/群信息的 MCP connector + 配套 skill。"
+    }
+  ]
+}

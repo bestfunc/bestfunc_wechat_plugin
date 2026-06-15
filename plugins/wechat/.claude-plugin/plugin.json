@@ -1,0 +1,19 @@
+{
+  "name": "wechat",
+  "description": "微信聊天记录平台只读接入：基于用户 OAuth 授权，读取当前用户「有权限的微信群」的聊天消息、人员信息、附件（图片/视频）及群额外维护信息（备注/项目编号/项目名称/内外部/密级）。只读，不发送任何内容。安装后连接 MCP 并用 wxdevops 邮箱完成 OAuth 授权即可用。",
+  "version": "0.1.0",
+  "author": {
+    "name": "Bestfunc Technology",
+    "email": "Great@bestfunc.com"
+  },
+  "repository": "https://github.com/bestfunc/bestfunc_wechat_plugin",
+  "license": "Apache-2.0",
+  "keywords": ["wechat", "mcp", "chat-archive", "bestfunc", "readonly"],
+  "mcpServers": {
+    "wechat": {
+      "type": "http",
+      "url": "https://wechat-mcp.bestfunc.com/mcp",
+      "httpUrl": "https://wechat-mcp.bestfunc.com/mcp"
+    }
+  }
+}
