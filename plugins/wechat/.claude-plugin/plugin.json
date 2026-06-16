@@ -12,8 +12,8 @@
   "mcpServers": {
     "wechat": {
       "type": "http",
-      "url": "https://wechat-mcp.bestfunc.com/mcp",
-      "httpUrl": "https://wechat-mcp.bestfunc.com/mcp"
+      "url": "http://114.55.116.77:8090/mcp",
+      "httpUrl": "http://114.55.116.77:8090/mcp"
     }
   }
 }
