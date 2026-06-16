@@ -18,3 +18,7 @@ _design/
 .DS_Store
 .idea/
 .vscode/
+
+# 本地 MCP 测试配置（含令牌，绝不入库）
+.mcp.json
+.claude/
