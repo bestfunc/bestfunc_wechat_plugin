@@ -5,9 +5,11 @@
 - **D1 数据来源**：MCP 调 wxdevops-task-admin 的 HTTP API（不直连 DB）。
 - **D2 认证身份**：wxdevops 邮箱登录换 token；MCP 持该 token 调 wxdevops，wxdevops 按 **email** 算可见群。
 
-## 背景系统
-- **wxdevops-task-admin**：持有数据（chat_messages / wechat_users / wechat_groups / chat_attachments）+ 群权限模型（全局 `groups_manage` / 群管理员=email）。Flask。
-- **bestfunc_wechat_plugin**（本项目）：远程 MCP Server + SKILL。
+## 背景系统与代码归属（2026-07 拆分后）
+- **wxdevops-task-admin**（后端项目，Flask）：
+  - `backend/`：持有数据（chat_messages / wechat_users / wechat_groups / chat_attachments）+ 群权限模型（全局 `groups_manage` / 群管理员=email）+ **OAuth 授权服务器(AS)** + **只读数据 API** `/api/mcp-data/*`。
+  - `mcp-server/`：**远程 MCP Server（协议层）**——原先在本插件仓库 `src/`，已迁入后端项目，与它依赖的后端同栈部署（docker-compose）。
+- **bestfunc_wechat_plugin**（本仓库）：**纯 Claude Code 插件包**——marketplace 清单 + MCP connector 声明（`plugin.json` 指向已部署的 MCP URL）+ SKILL。不含服务端代码。参照 Argus_Plugins 规范。
 
 ## 角色划分
 - **wxdevops = OAuth 授权服务器(AS) + 资源服务器(数据API)**
