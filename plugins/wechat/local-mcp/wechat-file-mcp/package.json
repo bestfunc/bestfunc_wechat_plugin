@@ -1,0 +1,10 @@
+{
+  "name": "@bestfunc-com/wechat-file-mcp",
+  "version": "0.1.0",
+  "description": "本地 stdio MCP:复用 felag-client 已授权的 wechat 连接器令牌(OS keychain),把微信群附件下载到本地并回传图片供分析。零依赖。",
+  "type": "commonjs",
+  "bin": { "wechat-file-mcp": "index.js" },
+  "main": "index.js",
+  "engines": { "node": ">=18" },
+  "license": "Apache-2.0"
+}

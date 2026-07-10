@@ -14,6 +14,14 @@
       "type": "http",
       "url": "http://114.55.116.77:8090/mcp",
       "httpUrl": "http://114.55.116.77:8090/mcp"
+    },
+    "wechat-file": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/local-mcp/wechat-file-mcp/index.js"],
+      "env": {
+        "WXDEVOPS_API_BASE": "http://114.55.116.77:5000"
+      }
     }
   }
 }
