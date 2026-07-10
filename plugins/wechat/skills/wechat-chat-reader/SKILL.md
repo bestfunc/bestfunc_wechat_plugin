@@ -30,6 +30,25 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 - **拿图片/视频/附件**：`get_group_attachments(room_id)` → 取 `download_url`；单个用 `get_attachment(attachment_id)`。
 - **读项目/备注/密级**：`get_group(room_id)` → `project_code / project_name / group_alias / biz_category_label / access_level_label`。
 
+## 消息字段（get_messages / search_messages 每条）
+- `message.sender_name`（=顶层 `sender_name`）：**已解析好的发送人显示名**，直接用它，不要再拿 `from`(内部 id)去猜名字；外部联系人无对应资料时为「外部联系人」。
+- `attachment`（图片/语音/视频/文件消息才有）：`{ url, file_name, format, file_type, file_size, oversize? }`。
+  - `url` 是**带签名、可直接点开的临时链接**（浏览器无需登录，约 7 天有效）。
+  - 文本消息无此字段。附件行未就绪时 `url` 可能为 null 且带 `pending:true`。
+
+## 展示格式（呈现聊天记录时遵循）
+逐条成行、便于阅读，**不要挤成一段**。每条建议：
+
+```
+[HH:MM] 发送人：内容
+```
+- 发送人一律用 `sender_name`。同一发送人连续多条可省略重复署名。
+- **图片/文件渲染成可点击 Markdown 链接**，用 `attachment.url` 与 `file_name`：
+  - 图片：`[🖼️ 图片 image_xxx.jpg](url)`（用户点开即看图）
+  - 其他文件：`[📎 file_name.ext](url)`
+  - 切勿输出「[发送了一张图片, N bytes]」这类无链接占位——务必给出可点开的 `attachment.url`。
+- 需要时在开头给一句话主题概述，再列消息；参与人可标注（己方/客户方）但名字仍以 `sender_name` 为准。
+
 ## 注意
 - **权限**：只能看到被授权的群（全局管理员=全部；群管理员=其负责的群）。
 - **密级**：群带 `access_level`（公开/内部/机密/绝密）；处理高密级内容遵从保密要求。
