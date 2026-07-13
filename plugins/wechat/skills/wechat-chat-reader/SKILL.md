@@ -28,6 +28,7 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 - **查某人发言**：`search_messages(keyword=人名, room_id=可选)`；或 `get_members` 确认后按发言人筛 `get_messages`。
 - **找关键词**：`search_messages(keyword=...)`（不传 room_id 跨所有可见群）。
 - **拿图片/视频/附件**：`get_group_attachments(room_id)` → 取 `download_url`；单个用 `get_attachment(attachment_id)`。
+- **要看图 / 读文件内容 / 下载到本地 / 总结时分析附件**：转用 `wechat-file` skill 的 `download_group_attachments(room_id)` —— 把附件下载到本机、图片回传直接看图分析，**>=100MB 自动跳过只给网络链接**。
 - **读项目/备注/密级**：`get_group(room_id)` → `project_code / project_name / group_alias / biz_category_label / access_level_label`。
 
 ## 消息字段（get_messages / search_messages 每条）
@@ -47,6 +48,7 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
   - 图片：`[🖼️ 图片 image_xxx.jpg](url)`（用户点开即看图）
   - 其他文件：`[📎 file_name.ext](url)`
   - 切勿输出「[发送了一张图片, N bytes]」这类无链接占位——务必给出可点开的 `attachment.url`。
+- **需要真正看图/读文件/本地下载**时（尤其总结群聊要分析附件）：改用 `wechat-file.download_group_attachments`，按其返回的 `render_markdown` 展示——图片内联 `![]()`、普通文件本地下载链接 `[📎 名.ext](file://...)`、`>=100MB` 网络下载链接。
 - 需要时在开头给一句话主题概述，再列消息；参与人可标注（己方/客户方）但名字仍以 `sender_name` 为准。
 
 ## 注意

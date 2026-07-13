@@ -41,17 +41,31 @@
 **若网络只放通了 8090、挡了 5000，会卡在「未授权」点授权走不通**——这是最常见的坑，
 请确认两个端口都可达（生产建议反代到同一 HTTPS 域名，见后端项目 `mcp-server/README.md`）。
 
-## MCP 工具（`mcp__wechat__*`，均只读）
-`list_groups` · `get_group` · `get_messages` · `search_messages` · `get_members` · `get_group_attachments` · `get_attachment`
+## 双 MCP 架构（对照 Argus 的 argus / argus-files）
+| MCP | 形态 | 职责 |
+|---|---|---|
+| `wechat` | 远程 HTTP（`:8090/mcp`） | 读聊天/人员/附件元数据/群信息进上下文 |
+| `wechat-file` | 本地 stdio（`node local-mcp/wechat-file-mcp/index.js`，零依赖） | 把附件**下载到本机**、图片回传分析、**>=100MB 跳过**；鉴权复用 felag 连接器 keychain 令牌，免重新授权 |
+
+## MCP 工具（均只读）
+- 远程 `mcp__wechat__*`：`list_groups` · `get_group` · `get_messages` · `search_messages` · `get_members` · `get_group_attachments` · `get_attachment`
+- 本地 `mcp__wechat-file__*`：`download_group_attachments` · `list_downloads`
+
+## 附件展示规则（skill 内置）
+- 图片：下载到本地并**内联 `![]()`**，同时回传给模型看图分析。
+- 普通文件：展示**文件名+后缀，可点击本地下载** `[📎 名.ext](file://…)`；需要时读本地路径分析内容。
+- **>=100MB**：不下载，给**网络下载链接**。
 
 ## 仓库结构
 ```
 .claude-plugin/marketplace.json        插件市场清单
 plugins/wechat/
-  .claude-plugin/plugin.json           插件清单（mcpServers 声明远程 http MCP）
+  .claude-plugin/plugin.json           插件清单（mcpServers 声明 wechat 远程 + wechat-file 本地）
   skills/
     wechat-chat-reader/SKILL.md        查询用法
+    wechat-file/SKILL.md               附件本地下载与分析用法
     mcp-authorization/SKILL.md         OAuth 授权说明
+  local-mcp/wechat-file-mcp/           本地 stdio MCP（零依赖 Node，附件下载器）
 docs/architecture.md                   架构与决策（服务端在 wxdevops-task-admin）
 ```
 

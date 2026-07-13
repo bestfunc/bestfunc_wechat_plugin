@@ -1,238 +1,376 @@
 #!/usr/bin/env node
-// wechat-file-mcp —— 本地 stdio MCP:复用 felag-client 已授权的 wechat 连接器令牌
-// (从 OS keychain 读,不改 felag-client、不重新授权),把微信群附件下载到本地磁盘,
-// 并可把图片以 MCP 图片内容直接回给模型,供本地汇总分析。零 npm 依赖(便于分发)。
-//
-// 令牌来源:felag-client 连接器把 OAuth 令牌存在 OS keychain:
-//   macOS  : generic password, service="felag-client-connector", account="wechat"
-//            值形如 "go-keyring-base64:<base64(JSON)>"
-//   Windows: 通用凭据(wincred), target="felag-client-connector:wechat", blob=原始 JSON(UTF-8)
-//   JSON: { access_token, refresh_token, token_endpoint, client_id, expires_at, ... }
-//
-// 配置(env,可在 plugin.json mcpServers 里给):
-//   WXDEVOPS_API_BASE          默认 http://114.55.116.77:5000
-//   FELAG_CONNECTOR_SERVICE    默认 felag-client-connector
-//   FELAG_CONNECTOR_ACCOUNT    默认 wechat
-//   WECHAT_DOWNLOAD_DIR        默认 <cwd>/wechat-attachments
-//   WECHAT_IMAGE_INLINE_MAX    单次回给模型的图片数上限(默认 20;0=不回图片内容)
-
+/**
+ * wechat-file-mcp —— 微信附件「本地文件」MCP（本地 stdio，零依赖）。
+ *
+ * 定位（对照 Argus 的 argus-files）：远程 wechat（HTTP MCP）把聊天/元数据读进上下文；
+ * 本地 wechat-file 把附件**直流下载到本机磁盘**并把图片回传给模型做本地读取/分析，绕开
+ * MCP base64 内联导致的上下文膨胀。**>=100MB 不下载**，只回网络下载链接。
+ *
+ * 鉴权：不自己走 OAuth，从 OS keychain 读 felag-client 连接器已存的 wechat 令牌
+ * （macOS security / Windows wincred / Linux secret-tool；或 env WECHAT_ACCESS_TOKEN 兜底），
+ * 过期用 refresh_token 自动刷新（仅内存态，不回写 keychain），再以 Bearer 调后端
+ * /api/mcp-data/attachments/<id>/download 下载。
+ *
+ * 协议：MCP stdio = 换行分隔 JSON-RPC 2.0。纯 Node 内置模块，无需 npm 安装。
+ */
 'use strict';
-const { execFileSync } = require('node:child_process');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
 
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const { URL } = require('url');
+
+const VERSION = '0.2.0';
+
+// ---- 配置 ----
 const API_BASE = (process.env.WXDEVOPS_API_BASE || 'http://114.55.116.77:5000').replace(/\/+$/, '');
 const KC_SERVICE = process.env.FELAG_CONNECTOR_SERVICE || 'felag-client-connector';
 const KC_ACCOUNT = process.env.FELAG_CONNECTOR_ACCOUNT || 'wechat';
-const DL_DIR = process.env.WECHAT_DOWNLOAD_DIR || path.join(process.cwd(), 'wechat-attachments');
-const IMG_INLINE_MAX = parseInt(process.env.WECHAT_IMAGE_INLINE_MAX || '20', 10);
+const DOWNLOAD_DIR = process.env.WECHAT_DOWNLOAD_DIR || path.join(process.cwd(), 'wechat-attachments');
+const IMAGE_INLINE_MAX = parseInt(process.env.WECHAT_IMAGE_INLINE_MAX || '20', 10);
+const DEFAULT_MAX_MB = parseInt(process.env.WECHAT_MAX_MB || '100', 10); // 全局：>=此值不下载
 
-// ---------- 日志(走 stderr,不污染 stdio 协议) ----------
-const log = (...a) => { try { process.stderr.write('[wechat-file-mcp] ' + a.join(' ') + '\n'); } catch (_) {} };
+const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'svg', 'tiff']);
+const MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', tiff: 'image/tiff', heic: 'image/heic', heif: 'image/heif' };
 
-// ---------- 读 OS keychain 里的连接器令牌 ----------
+function log(...a) { process.stderr.write('[wechat-file] ' + a.join(' ') + '\n'); }
+function ensureDir(d) { fs.mkdirSync(d, { recursive: true }); }
+function sanitize(name) { return String(name || '').replace(/[\/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 180); }
+function humanMB(b) { return (b || b === 0) ? Math.round((b / 1048576) * 10) / 10 : null; }
+function extOf(fileName, fileExt) {
+  let e = (fileExt || '').toString();
+  if (!e && fileName && fileName.includes('.')) e = fileName.split('.').pop();
+  return e.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+function isImage(ext, fileType) {
+  return (fileType && String(fileType).toLowerCase() === 'image') || IMAGE_EXTS.has(ext);
+}
+
+// ===================== 令牌（keychain 复用 + 刷新） =====================
+let _tok = null; // {access_token, refresh_token, token_endpoint, client_id, expires_at}
+
 function readKeychainRaw() {
-  if (process.platform === 'darwin') {
-    const out = execFileSync('security',
-      ['find-generic-password', '-s', KC_SERVICE, '-a', KC_ACCOUNT, '-w'],
-      { encoding: 'utf8' }).trim();
-    if (out.startsWith('go-keyring-base64:')) {
-      return Buffer.from(out.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
-    }
-    return out;
+  if (process.env.WECHAT_ACCESS_TOKEN) {
+    return JSON.stringify({ access_token: process.env.WECHAT_ACCESS_TOKEN });
   }
-  if (process.platform === 'win32') {
-    // 用 PowerShell + P/Invoke CredRead 按精确 target 读通用凭据(与 go-keyring 的 service:username 一致)
-    const target = `${KC_SERVICE}:${KC_ACCOUNT}`;
-    const ps = `
-$ErrorActionPreference='Stop'
-$sig=@"
-using System;using System.Runtime.InteropServices;
-public class Cred{
- [DllImport("advapi32.dll",CharSet=CharSet.Unicode,SetLastError=true)] public static extern bool CredRead(string t,int y,int f,out IntPtr c);
- [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr c);
- [StructLayout(LayoutKind.Sequential)] public struct CREDENTIAL{public int Flags;public int Type;public IntPtr TargetName;public IntPtr Comment;public long LastWritten;public int CredentialBlobSize;public IntPtr CredentialBlob;public int Persist;public int AttributeCount;public IntPtr Attributes;public IntPtr TargetAlias;public IntPtr UserName;}
- public static string Get(string t){IntPtr p;if(!CredRead(t,1,0,out p))return null;try{var c=(CREDENTIAL)Marshal.PtrToStructure(p,typeof(CREDENTIAL));byte[] b=new byte[c.CredentialBlobSize];Marshal.Copy(c.CredentialBlob,b,0,c.CredentialBlobSize);return System.Text.Encoding.UTF8.GetString(b);}finally{CredFree(p);}}
-}
-"@
-Add-Type $sig
-[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
-$v=[Cred]::Get('${target.replace(/'/g, "''")}')
-if($v -eq $null){exit 3} else {[Console]::Out.Write($v)}
-`.trim();
-    return execFileSync('powershell',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', ps],
-      { encoding: 'utf8' });
-  }
-  throw new Error(`unsupported platform: ${process.platform}`);
-}
-
-// ---------- 令牌管理:读 + 过期则刷新(内存态,不回写 keychain) ----------
-let _tok = null;
-function jwtExp(t) {
   try {
-    const p = JSON.parse(Buffer.from(t.split('.')[1], 'base64').toString('utf8'));
-    return typeof p.exp === 'number' ? p.exp : 0;
-  } catch (_) { return 0; }
+    if (process.platform === 'darwin') {
+      return execFileSync('security', ['find-generic-password', '-s', KC_SERVICE, '-a', KC_ACCOUNT, '-w'], { encoding: 'utf8' }).trim();
+    }
+    if (process.platform === 'linux') {
+      return execFileSync('secret-tool', ['lookup', 'service', KC_SERVICE, 'account', KC_ACCOUNT], { encoding: 'utf8' }).trim();
+    }
+    if (process.platform === 'win32') {
+      // wincred：go-keyring 存为 target=<service>:<account>；用 PowerShell + CredMan P/Invoke 读取 blob
+      const ps = [
+        '$ErrorActionPreference="Stop";',
+        '$sig=@"',
+        'using System;using System.Runtime.InteropServices;',
+        'public class Cred{',
+        '[StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)]public struct CREDENTIAL{public uint Flags;public uint Type;public string TargetName;public string Comment;public long LastWritten;public uint CredentialBlobSize;public IntPtr CredentialBlob;public uint Persist;public uint AttributeCount;public IntPtr Attributes;public string TargetAlias;public string UserName;}',
+        '[DllImport("advapi32",CharSet=CharSet.Unicode,SetLastError=true)]public static extern bool CredRead(string t,uint y,uint f,out IntPtr c);',
+        '[DllImport("advapi32")]public static extern void CredFree(IntPtr c);',
+        '}',
+        '"@;',
+        'Add-Type -TypeDefinition $sig;',
+        '$p=[IntPtr]::Zero;',
+        `if([Cred]::CredRead('${KC_SERVICE}:${KC_ACCOUNT}',1,0,[ref]$p)){`,
+        "$c=[Runtime.InteropServices.Marshal]::PtrToStructure($p,[Type]'Cred+CREDENTIAL');",
+        '$b=New-Object byte[] $c.CredentialBlobSize;',
+        '[Runtime.InteropServices.Marshal]::Copy($c.CredentialBlob,$b,0,$c.CredentialBlobSize);',
+        '[Cred]::CredFree($p);',
+        '[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b));}',
+      ].join('');
+      return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' }).trim();
+    }
+  } catch (e) {
+    log('读 keychain 失败:', e.message);
+  }
+  return '';
 }
-async function refresh(rec) {
-  if (!rec.refresh_token || !rec.token_endpoint) throw new Error('无 refresh_token/token_endpoint,无法刷新');
-  const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: rec.refresh_token });
-  if (rec.client_id) body.set('client_id', rec.client_id);
-  const r = await fetch(rec.token_endpoint, {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+
+function loadToken() {
+  if (_tok) return _tok;
+  let raw = readKeychainRaw();
+  if (!raw) throw new Error('未找到 wechat 令牌：请确认 felag-client 已登录授权，或设 env WECHAT_ACCESS_TOKEN');
+  if (raw.startsWith('go-keyring-base64:')) {
+    raw = Buffer.from(raw.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
+  }
+  let obj;
+  try { obj = JSON.parse(raw); } catch (_) { obj = { access_token: raw }; }
+  if (!obj.access_token) throw new Error('令牌格式异常：缺少 access_token');
+  _tok = obj;
+  return _tok;
+}
+
+function expiresSoon(tok) {
+  const ea = tok.expires_at;
+  if (!ea) return false;
+  const sec = typeof ea === 'number' ? ea : Math.floor(new Date(ea).getTime() / 1000);
+  if (!Number.isFinite(sec)) return false;
+  return sec - Math.floor(Date.now() / 1000) < 60;
+}
+
+async function refreshToken() {
+  const t = _tok || loadToken();
+  if (!t.refresh_token || !t.token_endpoint) throw new Error('无法刷新：缺少 refresh_token/token_endpoint');
+  const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: t.refresh_token, client_id: t.client_id || '' }).toString();
+  const res = await httpRequest(t.token_endpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+  if (res.status !== 200) throw new Error('刷新令牌失败 HTTP ' + res.status);
+  const j = JSON.parse(res.body.toString('utf8'));
+  t.access_token = j.access_token;
+  if (j.refresh_token) t.refresh_token = j.refresh_token;
+  if (j.expires_in) t.expires_at = Math.floor(Date.now() / 1000) + Number(j.expires_in);
+  _tok = t;
+  log('已刷新 access_token');
+  return t.access_token;
+}
+
+async function bearer() {
+  const t = loadToken();
+  if (expiresSoon(t)) { try { await refreshToken(); } catch (e) { log(e.message); } }
+  return t.access_token;
+}
+
+// ===================== 通用 HTTP =====================
+function httpRequest(url, opts = {}, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error('too many redirects'));
+    let u; try { u = new URL(url); } catch (_) { return reject(new Error('invalid url: ' + url)); }
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.request(u, { method: opts.method || 'GET', headers: opts.headers || {}, timeout: opts.timeout || 30000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(httpRequest(new URL(res.headers.location, u).toString(), opts, redirects + 1));
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    if (opts.body) req.write(opts.body);
+    req.end();
   });
-  if (!r.ok) throw new Error(`刷新令牌失败 ${r.status}`);
-  const j = await r.json();
-  rec.access_token = j.access_token || rec.access_token;
-  if (j.refresh_token) rec.refresh_token = j.refresh_token;
-  return rec;
 }
-async function accessToken() {
-  if (!_tok) {
-    const raw = readKeychainRaw();
-    if (!raw || !raw.trim()) throw new Error('keychain 未找到 wechat 连接器令牌;请先在 felag-client 连接器页完成 wechat 授权');
-    _tok = JSON.parse(raw.trim());
+
+async function apiGetJson(pathname) {
+  let tok = await bearer();
+  let res = await httpRequest(`${API_BASE}${pathname}`, { headers: { authorization: `Bearer ${tok}` } });
+  if (res.status === 401) { tok = await refreshToken(); res = await httpRequest(`${API_BASE}${pathname}`, { headers: { authorization: `Bearer ${tok}` } }); }
+  if (res.status !== 200) throw new Error(`GET ${pathname} → HTTP ${res.status}`);
+  return JSON.parse(res.body.toString('utf8'));
+}
+
+// 流式下载到 destPath，超过 maxBytes 立即中止并删除半成品；带 Bearer + 401 刷新重试
+function streamDownload(url, destPath, maxBytes, token, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (redirects > 5) return reject(new Error('too many redirects'));
+    let u; try { u = new URL(url); } catch (_) { return reject(new Error('invalid url')); }
+    const lib = u.protocol === 'https:' ? https : http;
+    const headers = token ? { authorization: `Bearer ${token}` } : {};
+    const req = lib.get(u, { timeout: 180000, headers }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(streamDownload(new URL(res.headers.location, u).toString(), destPath, maxBytes, token, redirects + 1));
+      }
+      if (res.statusCode === 401) { res.resume(); return resolve({ unauthorized: true }); }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      const declared = res.headers['content-length'] ? parseInt(res.headers['content-length'], 10) : null;
+      if (Number.isFinite(declared) && declared > maxBytes) { res.destroy(); return resolve({ oversize: true, size: declared }); }
+      let written = 0;
+      const out = fs.createWriteStream(destPath);
+      res.on('data', (chunk) => {
+        written += chunk.length;
+        if (written > maxBytes) { res.destroy(); out.destroy(); fs.unlink(destPath, () => {}); resolve({ oversize: true, size: written }); }
+      });
+      res.pipe(out);
+      out.on('finish', () => out.close(() => resolve({ oversize: false, size: written })));
+      out.on('error', (e) => { fs.unlink(destPath, () => {}); reject(e); });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('download timeout')); });
+  });
+}
+
+async function downloadById(id, destPath, maxBytes) {
+  let tok = await bearer();
+  const url = `${API_BASE}/api/mcp-data/attachments/${id}/download`;
+  let r = await streamDownload(url, destPath, maxBytes, tok);
+  if (r.unauthorized) { tok = await refreshToken(); r = await streamDownload(url, destPath, maxBytes, tok); }
+  return r;
+}
+
+// ===================== 工具实现 =====================
+function renderMarkdown(item) {
+  const fn = item.file_name || item.id;
+  if (item.status === 'skipped_oversize') {
+    const sz = item.size_mb != null ? ` ${item.size_mb}MB` : '';
+    return `[📎 ${fn}${sz}（点击从网络下载）](${item.network_url})`;
   }
-  const at = _tok.access_token;
-  const exp = jwtExp(at);
-  if (!at || (exp && exp - 30 < Math.floor(Date.now() / 1000))) {
-    log('access_token 过期/缺失,尝试刷新');
-    await refresh(_tok);
+  if (item.status === 'downloaded') {
+    return item.is_image ? `![${fn}](${item.local_path})` : `[📎 ${fn}（本地下载）](file://${item.local_path})`;
   }
-  return _tok.access_token;
+  return `~~${fn}（${item.status}）~~`;
 }
 
-// ---------- 调 MCP 数据 API(Bearer) ----------
-async function apiGet(pathname, { binary = false } = {}) {
-  const tok = await accessToken();
-  const r = await fetch(API_BASE + pathname, { headers: { Authorization: `Bearer ${tok}` } });
-  if (r.status === 401) {
-    // 令牌可能刚过期:强制刷新一次再试
-    await refresh(_tok);
-    const r2 = await fetch(API_BASE + pathname, { headers: { Authorization: `Bearer ${_tok.access_token}` } });
-    if (!r2.ok) throw new Error(`${pathname} 返回 ${r2.status}`);
-    return binary ? Buffer.from(await r2.arrayBuffer()) : r2.json();
-  }
-  if (!r.ok) throw new Error(`${pathname} 返回 ${r.status}`);
-  return binary ? Buffer.from(await r.arrayBuffer()) : r.json();
-}
+async function downloadGroupAttachments(args) {
+  const roomId = args && args.room_id;
+  if (!roomId) return { error: '缺少 room_id（先用 wechat.list_groups 拿 room_id）' };
+  const limit = Math.max(1, Math.min(200, Number(args.limit) || 20));
+  const dir = args.dir || DOWNLOAD_DIR;
+  const inlineImages = args.inline_images !== false;
+  const maxBytes = Math.round((Number(args.max_mb) || DEFAULT_MAX_MB) * 1048576);
+  ensureDir(dir);
 
-function sanitize(name) {
-  return String(name || 'file').replace(/[\/\\:*?"<>|\x00-\x1f]/g, '_').slice(0, 180);
-}
-const IMG_EXT = { image: 'image/png', emotion: 'image/gif' };
-
-// ---------- 工具实现:下载一个群的附件到本地 ----------
-async function downloadGroupAttachments({ room_id, limit = 50, dir, inline_images = true }) {
-  if (!room_id) throw new Error('room_id 必填');
-  const outDir = path.resolve(dir || DL_DIR, sanitize(room_id));
-  fs.mkdirSync(outDir, { recursive: true });
-
-  const listResp = await apiGet(`/api/mcp-data/groups/${encodeURIComponent(room_id)}/attachments?page=1&pageSize=${limit}`);
-  const items = (listResp && listResp.data && (listResp.data.items || listResp.data.list || listResp.data)) || [];
-  const arr = Array.isArray(items) ? items : (items.items || []);
+  const resp = await apiGetJson(`/api/mcp-data/groups/${encodeURIComponent(roomId)}/attachments?pageSize=${limit}`);
+  const data = resp.data || resp;
+  const list = Array.isArray(data) ? data : (data.items || data.list || []);
 
   const results = [];
-  const imageContents = [];
-  for (const a of arr) {
-    const id = a.id || a.attachment_id;
-    if (!id) continue;
-    const fname = sanitize(a.file_name || `${a.file_type || 'file'}_${id}`);
-    const dest = path.join(outDir, `${id}__${fname}`);
+  let inlined = 0;
+  const imageBlocks = [];
+
+  for (const a of list.slice(0, limit)) {
+    const id = a.id;
+    const ext = extOf(a.file_name, a.file_ext);
+    const img = isImage(ext, a.file_type);
+    const size = Number(a.file_size) || null;
+    const fn = sanitize(a.file_name || (id + (ext ? '.' + ext : '')));
+    const base = { id, file_name: a.file_name || fn, ext, is_image: img, size_bytes: size, size_mb: humanMB(size), uploader_name: a.uploader_name || null, msg_time: a.msg_time || null };
+
+    // >=100MB：不下载，给网络下载链接（优先记录里的 download_url，回退 mcp-data 下载端点）
+    if (Number.isFinite(size) && size >= maxBytes) {
+      const item = { ...base, status: 'skipped_oversize', network_url: a.download_url || `${API_BASE}/api/mcp-data/attachments/${id}/download`, reason: `>=${args.max_mb || DEFAULT_MAX_MB}MB 不下载` };
+      item.render_markdown = renderMarkdown(item);
+      results.push(item);
+      continue;
+    }
+
+    const destPath = path.join(dir, `${String(id).slice(0, 8)}_${fn}`);
     try {
-      const buf = await apiGet(`/api/mcp-data/attachments/${encodeURIComponent(id)}/download`, { binary: true });
-      fs.writeFileSync(dest, buf);
-      const rec = { id, file_name: a.file_name, file_type: a.file_type, file_size: buf.length, local_path: dest };
-      results.push(rec);
-      if (inline_images && IMG_EXT[a.file_type] && imageContents.length < IMG_INLINE_MAX && buf.length <= 4 * 1024 * 1024) {
-        imageContents.push({ type: 'image', data: buf.toString('base64'), mimeType: IMG_EXT[a.file_type] });
+      let r;
+      if (fs.existsSync(destPath) && fs.statSync(destPath).size > 0) {
+        r = { oversize: false, size: fs.statSync(destPath).size, cached: true };
+      } else {
+        r = await downloadById(id, destPath, maxBytes);
+      }
+      if (r.oversize) {
+        const item = { ...base, status: 'skipped_oversize', size_bytes: r.size, size_mb: humanMB(r.size), network_url: a.download_url || `${API_BASE}/api/mcp-data/attachments/${id}/download`, reason: `下载中超过阈值已中止` };
+        item.render_markdown = renderMarkdown(item);
+        results.push(item);
+        continue;
+      }
+      const item = { ...base, status: 'downloaded', local_path: destPath, cached: !!r.cached, size_bytes: r.size, size_mb: humanMB(r.size) };
+      item.render_markdown = renderMarkdown(item);
+      results.push(item);
+      // 图片回传给模型做分析（受 inline 上限）
+      if (img && inlineImages && inlined < IMAGE_INLINE_MAX) {
+        try {
+          const b64 = fs.readFileSync(destPath).toString('base64');
+          imageBlocks.push({ type: 'image', data: b64, mimeType: MIME[ext] || 'image/jpeg' });
+          inlined++;
+        } catch (_) {}
       }
     } catch (e) {
-      results.push({ id, file_name: a.file_name, file_type: a.file_type, error: String(e.message || e) });
+      const item = { ...base, status: 'error', error: String(e && e.message || e) };
+      item.render_markdown = renderMarkdown(item);
+      results.push(item);
     }
   }
 
-  const okCount = results.filter(r => r.local_path).length;
-  const summary =
-    `已下载 ${okCount}/${results.length} 个附件到本地目录:\n${outDir}\n\n` +
-    results.map(r => r.local_path
-      ? `· ${r.file_name || r.id} (${r.file_type}, ${r.file_size}B) -> ${r.local_path}`
-      : `· ${r.file_name || r.id} 下载失败: ${r.error}`).join('\n');
-
-  const content = [{ type: 'text', text: summary }, ...imageContents];
-  return { content };
+  const summary = {
+    room_id: roomId, dir, total: results.length,
+    downloaded: results.filter((r) => r.status === 'downloaded').length,
+    skipped_oversize: results.filter((r) => r.status === 'skipped_oversize').length,
+    errors: results.filter((r) => r.status === 'error').length,
+    inlined_images: inlined,
+    items: results,
+    note: '图片用 render_markdown 内联展示；普通文件用 render_markdown 给本地下载链接；>=100MB 用 network_url 给网络下载链接。已内联的图片可直接读图分析。',
+  };
+  return { summary, imageBlocks };
 }
 
-// ---------- 工具清单 ----------
+function listDownloads(args) {
+  const dir = (args && args.dir) || DOWNLOAD_DIR;
+  if (!fs.existsSync(dir)) return { dir, count: 0, files: [] };
+  const files = fs.readdirSync(dir).map((f) => { const p = path.join(dir, f); const st = fs.statSync(p); return { file: f, local_path: p, size_bytes: st.size, size_mb: humanMB(st.size) }; });
+  return { dir, count: files.length, files };
+}
+
+// ===================== 工具清单 =====================
 const TOOLS = [
   {
     name: 'download_group_attachments',
-    description: '把某个微信群的附件(图片/视频/文件)下载到本地磁盘,返回本地路径;图片会同时以图片内容回传供直接查看/分析。用已授权的 wechat 连接器令牌访问,无需重新授权。',
+    description: '把某个微信群的附件（图片/视频/文件）直流下载到本机目录并返回本地路径；图片同时以图片内容回传供直接查看/分析。**>=100MB 不下载**，只回网络下载链接。每项含 render_markdown：图片→内联 ![]()、普通文件→本地下载链接、超限→网络下载链接。先用 wechat.list_groups 拿 room_id。',
     inputSchema: {
       type: 'object',
       properties: {
-        room_id: { type: 'string', description: '群 ID(room_id/group_id),先用 wechat 的 list_groups 拿到' },
-        limit: { type: 'integer', description: '最多下载多少个附件(默认 50)', default: 50 },
-        dir: { type: 'string', description: '本地保存根目录(可选,默认 WECHAT_DOWNLOAD_DIR 或 ./wechat-attachments)' },
-        inline_images: { type: 'boolean', description: '是否把图片以图片内容回传(默认 true)', default: true },
+        room_id: { type: 'string', description: '群 id（=group_id，来自 wechat.list_groups）' },
+        limit: { type: 'number', description: '最多处理的附件数（默认 20，按时间倒序）' },
+        dir: { type: 'string', description: '下载目录（默认 env WECHAT_DOWNLOAD_DIR 或 <cwd>/wechat-attachments）' },
+        inline_images: { type: 'boolean', description: '是否把图片回传给模型分析（默认 true，上限 env WECHAT_IMAGE_INLINE_MAX）' },
+        max_mb: { type: 'number', description: '不下载阈值(MB)，默认 100' },
       },
       required: ['room_id'],
     },
   },
+  {
+    name: 'list_downloads',
+    description: '列出下载目录里已落盘的附件。',
+    inputSchema: { type: 'object', properties: { dir: { type: 'string' } } },
+  },
 ];
 
-async function callTool(name, args) {
+async function dispatch(name, args) {
   if (name === 'download_group_attachments') return downloadGroupAttachments(args || {});
-  throw new Error(`未知工具: ${name}`);
+  if (name === 'list_downloads') return listDownloads(args || {});
+  throw new Error('unknown tool: ' + name);
 }
 
-// ---------- MCP stdio JSON-RPC(换行分隔) ----------
+// ===================== JSON-RPC over stdio =====================
 function send(obj) { process.stdout.write(JSON.stringify(obj) + '\n'); }
-function reply(id, result) { send({ jsonrpc: '2.0', id, result }); }
-function replyErr(id, code, message) { send({ jsonrpc: '2.0', id, error: { code, message } }); }
 
-let PROTO = '2025-06-18';
 async function handle(msg) {
   const { id, method, params } = msg;
-  if (method === 'initialize') {
-    if (params && params.protocolVersion) PROTO = params.protocolVersion;
-    return reply(id, {
-      protocolVersion: PROTO,
-      capabilities: { tools: {} },
-      serverInfo: { name: 'wechat-file-mcp', version: '0.1.0' },
-    });
-  }
-  if (method === 'notifications/initialized' || method === 'notifications/cancelled') return;
-  if (method === 'ping') return reply(id, {});
-  if (method === 'tools/list') return reply(id, { tools: TOOLS });
-  if (method === 'tools/call') {
-    const nm = params && params.name;
-    try {
-      const out = await callTool(nm, params && params.arguments);
-      return reply(id, out);
-    } catch (e) {
-      log('tool error:', String(e && e.stack || e));
-      return reply(id, { content: [{ type: 'text', text: `错误: ${String(e && e.message || e)}` }], isError: true });
+  const isNotification = id === undefined || id === null;
+  try {
+    if (method === 'initialize') {
+      return send({ jsonrpc: '2.0', id, result: { protocolVersion: (params && params.protocolVersion) || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'wechat-file', version: VERSION } } });
     }
+    if (method === 'notifications/initialized' || method === 'initialized') return;
+    if (method === 'ping') return send({ jsonrpc: '2.0', id, result: {} });
+    if (method === 'tools/list') return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
+    if (method === 'tools/call') {
+      const out = await dispatch(params && params.name, params && params.arguments);
+      // download_group_attachments 返回 {summary, imageBlocks}；其它工具直接返回对象
+      let content;
+      if (out && out.summary !== undefined) {
+        content = [{ type: 'text', text: JSON.stringify(out.summary) }, ...(out.imageBlocks || [])];
+      } else {
+        content = [{ type: 'text', text: JSON.stringify(out) }];
+      }
+      return send({ jsonrpc: '2.0', id, result: { content, isError: !!(out && out.error) } });
+    }
+    if (!isNotification) send({ jsonrpc: '2.0', id, error: { code: -32601, message: 'Method not found: ' + method } });
+  } catch (e) {
+    if (!isNotification) send({ jsonrpc: '2.0', id, error: { code: -32000, message: String(e && e.message || e) } });
   }
-  if (id !== undefined) return replyErr(id, -32601, `Method not found: ${method}`);
 }
 
 let buf = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
   buf += chunk;
-  let idx;
-  while ((idx = buf.indexOf('\n')) >= 0) {
-    const line = buf.slice(0, idx).trim();
-    buf = buf.slice(idx + 1);
+  let nl;
+  while ((nl = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
     if (!line) continue;
-    let msg;
-    try { msg = JSON.parse(line); } catch (_) { continue; }
-    Promise.resolve(handle(msg)).catch((e) => log('handle error:', String(e)));
+    let msg; try { msg = JSON.parse(line); } catch (_) { continue; }
+    handle(msg);
   }
 });
 process.stdin.on('end', () => process.exit(0));
-log(`started; api=${API_BASE} keychain=${KC_SERVICE}/${KC_ACCOUNT} dl=${DL_DIR}`);

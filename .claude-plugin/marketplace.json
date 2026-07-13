@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Bestfunc 微信聊天记录平台的 Claude Code plugin 市场。",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "wechat",
       "source": "./plugins/wechat",
-      "description": "微信聊天记录只读接入：按用户 OAuth 授权读取可访问群的聊天/人员/附件/群信息的 MCP connector + 配套 skill。"
+      "description": "微信聊天记录只读接入：远程 wechat（HTTP MCP，读聊天/人员/附件/群信息）+ 本地 wechat-file（stdio MCP，把附件下载到本机、>=100MB 跳过、图片回传分析）+ 配套 skill。"
     }
   ]
 }
