@@ -34,7 +34,7 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 ## 消息字段（get_messages / search_messages 每条）
 - `message.sender_name`（=顶层 `sender_name`）：**已解析好的发送人显示名**，直接用它，不要再拿 `from`(内部 id)去猜名字；外部联系人无对应资料时为「外部联系人」。
 - `attachment`（图片/语音/视频/文件消息才有）：`{ url, file_name, format, file_type, file_size, oversize? }`。
-  - `url` 是**带签名、可直接点开的临时链接**（浏览器无需登录，约 7 天有效）。
+  - ⚠️ `url` 是 `http://…:3001/api/attachments/…?sig=…` 的**网络连接（签名直链）**——**不是本地连接**。**不要**直接拿它当 <100MB 附件的点击链接（见下方渲染规则）。
   - 文本消息无此字段。附件行未就绪时 `url` 可能为 null 且带 `pending:true`。
 
 ## 展示格式（呈现聊天记录时遵循）
@@ -44,11 +44,21 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 [HH:MM] 发送人：内容
 ```
 - 发送人一律用 `sender_name`。同一发送人连续多条可省略重复署名。
-- **图片/文件渲染成可点击 Markdown 链接**，用 `attachment.url` 与 `file_name`：
-  - 图片：`[🖼️ 图片 image_xxx.jpg](url)`（用户点开即看图）
-  - 其他文件：`[📎 file_name.ext](url)`
-  - 切勿输出「[发送了一张图片, N bytes]」这类无链接占位——务必给出可点开的 `attachment.url`。
-- **需要真正看图/读文件/本地下载**时（尤其总结群聊要分析附件）：改用 `wechat-file.download_group_attachments`，按其返回的 `render_markdown` 展示——图片内联 `![]()`、普通文件本地下载链接 `[📎 名.ext](file://...)`、`>=100MB` 网络下载链接。
+- 切勿输出「[图片]」「[表情 GIF]」「[发送了一张图片, N bytes]」这类**无链接占位**。
+
+### 附件链接规则：**本地连接优先，网络连接只留给 >=100MB**
+呈现带附件的聊天时，**先用 `wechat-file.download_group_attachments(room_id)` 把附件下到本机**，再按 `file_name` 与 get_messages 的消息对应，用 wechat-file 返回的 `render_markdown`：
+
+| 情况 | 渲染（用什么链接） |
+|---|---|
+| 图片（<100MB，已下载） | **本地连接**：`![文件名](本地路径)` 内联展示 |
+| 其他文件（<100MB，已下载） | **本地连接**：`[📎 文件名.ext（本地下载）](file://本地路径)` |
+| `>=100MB`（未下载） | **网络连接**：`[📎 文件名 NNNmb（点击从网络下载）](网络链接)` ← 只有这种才用 `:3001` 网络直链 |
+| 后端取不到（下载 500/error） | 标注「⚠️ 该附件暂不可用」，**不要**给坏链接 |
+
+> 要点：`get_messages.attachment.url`（:3001 网络直链）**只在 >=100MB 或本地下载失败时兜底**；<100MB 一律走 wechat-file 的**本地连接**（`file://本地路径`）。
+> 若客户端未装本地 `wechat-file`（如纯浏览器场景），才回退用网络 `attachment.url`。
+
 - 需要时在开头给一句话主题概述，再列消息；参与人可标注（己方/客户方）但名字仍以 `sender_name` 为准。
 
 ## 注意
