@@ -34,7 +34,7 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 ## 消息字段（get_messages / search_messages 每条）
 - `message.sender_name`（=顶层 `sender_name`）：**已解析好的发送人显示名**，直接用它，不要再拿 `from`(内部 id)去猜名字；外部联系人无对应资料时为「外部联系人」。
 - `attachment`（图片/语音/视频/文件消息才有）：`{ url, file_name, format, file_type, file_size, oversize? }`。
-  - ⚠️ `url` 是 `http://…:3001/api/attachments/…?sig=…` 的**网络连接（签名直链）**——**不是本地连接**。**不要**直接拿它当 <100MB 附件的点击链接（见下方渲染规则）。
+  - `url` = `http://…:3001/api/attachments/…?exp=&sig=` 网络签名直链（http，签名约 7 天有效）。**呈现图片时直接用它**吐 `![](url)`（见下方规则）。
   - 文本消息无此字段。附件行未就绪时 `url` 可能为 null 且带 `pending:true`。
 
 ## 展示格式（呈现聊天记录时遵循）
@@ -46,18 +46,17 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 - 发送人一律用 `sender_name`。同一发送人连续多条可省略重复署名。
 - 切勿输出「[图片]」「[表情 GIF]」「[发送了一张图片, N bytes]」这类**无链接占位**。
 
-### 附件链接规则：**本地连接优先，网络连接只留给 >=100MB**
-呈现带附件的聊天时，**先用 `wechat-file.download_group_attachments(room_id)` 把附件下到本机**，再按 `file_name` 与 get_messages 的消息对应，用 wechat-file 返回的 `render_markdown`：
+### 附件展示规则：图片直接吐 markdown 图片，**别概括成 [图片]**
+- **图片 / 表情 / GIF 消息**：**直接输出** `![file_name](attachment.url)`——原样用 `attachment.url`。**严禁**写成 `[图片]`/`[表情 GIF]`/`[发送了一张图片]`。
+- **其它文件**：`[📎 file_name](attachment.url)`（可点击下载）。
+- **>=100MB（oversize=true）**：`[📎 file_name（点击下载）](attachment.url)`，不内联。
+- **url 为 null / pending / 后端取不到（500）**：标注「⚠️ 该附件暂不可用」，不要编链接。
 
-| 情况 | 渲染（用什么链接） |
-|---|---|
-| 图片（<100MB，已下载） | **本地连接**：`![文件名](本地路径)` 内联展示 |
-| 其他文件（<100MB，已下载） | **本地连接**：`[📎 文件名.ext（本地下载）](file://本地路径)` |
-| `>=100MB`（未下载） | **网络连接**：`[📎 文件名 NNNmb（点击从网络下载）](网络链接)` ← 只有这种才用 `:3001` 网络直链 |
-| 后端取不到（下载 500/error） | 标注「⚠️ 该附件暂不可用」，**不要**给坏链接 |
+⚠️ **两个渲染坑（不避开就是"显示不出来"）**：
+1. **别把 `![](url)` 放进表格单元格**——GFM 表格 cell 里的图片语法多数渲染器不认。含图片的聊天**改用逐行格式**（`[时间] 发送人：` 后，图片**单独成行** `![](url)`），或把图片统一列在表格外，别塞进「内容」列。
+2. **链接是 http（非 https）+ 签名约 7 天到期**：http 外链在 https 场景可能被拦（混合内容）；旧导出超过 `exp` 会变死链。图片出不来先查这两点。
 
-> 要点：`get_messages.attachment.url`（:3001 网络直链）**只在 >=100MB 或本地下载失败时兜底**；<100MB 一律走 wechat-file 的**本地连接**（`file://本地路径`）。
-> 若客户端未装本地 `wechat-file`（如纯浏览器场景），才回退用网络 `attachment.url`。
+> 想读文件**内容**做分析、或要本机副本时，才用 `wechat-file.download_group_attachments`。展示图片本身用上面的 `![](url)` 即可。
 
 - 需要时在开头给一句话主题概述，再列消息；参与人可标注（己方/客户方）但名字仍以 `sender_name` 为准。
 
