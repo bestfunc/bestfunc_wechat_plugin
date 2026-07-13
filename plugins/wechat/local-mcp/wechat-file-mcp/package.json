@@ -1,6 +1,6 @@
 {
   "name": "wechat-file-mcp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "微信聊天记录附件本地文件 MCP（本地 stdio，零依赖）：把附件直流下载到本机、>=100MB 跳过，供数字员工读取分析。",
   "private": true,
   "bin": { "wechat-file-mcp": "index.js" },

@@ -24,17 +24,16 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 > 群唯一标识是 `room_id`（=group_id）。先 `list_groups` 拿 room_id，再查内容。
 
 ## 典型用法
-- **总结某群本周**：`list_groups`(按名找 room_id) → `get_messages(room_id, since=本周起始毫秒, page_size=100)`(必要时翻页) → 按发言人/决策/待办汇总。
+- **总结/分析某群**：`list_groups`(找 room_id) → `get_messages`(读文本) → `wechat-file.download_group_attachments(room_id)`(把 **<100MB 附件下到本机**) → **读取下载的本地文件**(图片看图、文档/表格/HTML 读内容) → 把聊天文本 **+ 附件内容结合起来**汇总。附件按下方「附件展示规则」渲染。
 - **查某人发言**：`search_messages(keyword=人名, room_id=可选)`；或 `get_members` 确认后按发言人筛 `get_messages`。
 - **找关键词**：`search_messages(keyword=...)`（不传 room_id 跨所有可见群）。
-- **拿图片/视频/附件**：`get_group_attachments(room_id)` → 取 `download_url`；单个用 `get_attachment(attachment_id)`。
-- **要看图 / 读文件内容 / 下载到本地 / 总结时分析附件**：转用 `wechat-file` skill 的 `download_group_attachments(room_id)` —— 把附件下载到本机、图片回传直接看图分析，**>=100MB 自动跳过只给网络链接**。
+- **看图 / 读文件内容 / 本地下载**：`wechat-file.download_group_attachments(room_id)` —— <100MB 下到本机（图片回传可直接看图、文件给本地路径可读），**>=100MB 跳过只给网络链接**。
 - **读项目/备注/密级**：`get_group(room_id)` → `project_code / project_name / group_alias / biz_category_label / access_level_label`。
 
 ## 消息字段（get_messages / search_messages 每条）
 - `message.sender_name`（=顶层 `sender_name`）：**已解析好的发送人显示名**，直接用它，不要再拿 `from`(内部 id)去猜名字；外部联系人无对应资料时为「外部联系人」。
 - `attachment`（图片/语音/视频/文件消息才有）：`{ url, file_name, format, file_type, file_size, oversize? }`。
-  - `url` = `http://…:3001/api/attachments/…?exp=&sig=` 网络签名直链（http，签名约 7 天有效）。**呈现图片时直接用它**吐 `![](url)`（见下方规则）。
+  - `url` = `http://…:3001/api/attachments/…?exp=&sig=` 网络签名直链（http，约 7 天有效）。**仅 >=100MB** 时用它做网络下载链接；**<100MB 走本地连接**（见下方规则）。
   - 文本消息无此字段。附件行未就绪时 `url` 可能为 null 且带 `pending:true`。
 
 ## 展示格式（呈现聊天记录时遵循）
@@ -46,17 +45,18 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 - 发送人一律用 `sender_name`。同一发送人连续多条可省略重复署名。
 - 切勿输出「[图片]」「[表情 GIF]」「[发送了一张图片, N bytes]」这类**无链接占位**。
 
-### 附件展示规则：图片直接吐 markdown 图片，**别概括成 [图片]**
-- **图片 / 表情 / GIF 消息**：**直接输出** `![file_name](attachment.url)`——原样用 `attachment.url`。**严禁**写成 `[图片]`/`[表情 GIF]`/`[发送了一张图片]`。
-- **其它文件**：`[📎 file_name](attachment.url)`（可点击下载）。
-- **>=100MB（oversize=true）**：`[📎 file_name（点击下载）](attachment.url)`，不内联。
+### 附件展示规则：<100MB 本地连接（并读取分析），>=100MB 网络连接，**别概括成 [图片]**
+- **<100MB（图片/文件）→ 本地连接**：先 `wechat-file.download_group_attachments(room_id)` 下到本机，用返回的**本地路径**：
+  - 图片/表情/GIF：`![file_name](本地路径)` 内联；
+  - 其它文件：`[📎 file_name](file://本地路径)` 可点击本地下载。
+  - **分析时读取这些本地文件**：图片直接看图、文档/表格/HTML 读 `local_path` 内容，与聊天文本**结合分析**（别只贴链接不看内容）。
+- **>=100MB（oversize）→ 网络连接**：`[📎 file_name（点击下载）](attachment.url)`，不下载、不内联。
 - **url 为 null / pending / 后端取不到（500）**：标注「⚠️ 该附件暂不可用」，不要编链接。
+- **严禁** `[图片]`/`[表情 GIF]`/`[发送了一张图片]` 占位。
 
-⚠️ **两个渲染坑（不避开就是"显示不出来"）**：
-1. **别把 `![](url)` 放进表格单元格**——GFM 表格 cell 里的图片语法多数渲染器不认。含图片的聊天**改用逐行格式**（`[时间] 发送人：` 后，图片**单独成行** `![](url)`），或把图片统一列在表格外，别塞进「内容」列。
-2. **链接是 http（非 https）+ 签名约 7 天到期**：http 外链在 https 场景可能被拦（混合内容）；旧导出超过 `exp` 会变死链。图片出不来先查这两点。
-
-> 想读文件**内容**做分析、或要本机副本时，才用 `wechat-file.download_group_attachments`。展示图片本身用上面的 `![](url)` 即可。
+⚠️ **两个渲染坑**：
+1. 图片 `![]()` **单独成行、别放 GFM 表格单元格**（多数渲染器不认）；含图片的聊天改逐行格式，或图片列在表格外，别塞进「内容」列。
+2. `>=100MB` 的网络链接是 http（非 https）+ 签名约 7 天到期：https 场景可能混合内容被拦、旧链接过 `exp` 变死链。
 
 - 需要时在开头给一句话主题概述，再列消息；参与人可标注（己方/客户方）但名字仍以 `sender_name` 为准。
 
