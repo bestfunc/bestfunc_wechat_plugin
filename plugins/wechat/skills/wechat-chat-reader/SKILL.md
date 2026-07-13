@@ -43,7 +43,7 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 [HH:MM] 发送人：内容
 ```
 - 发送人一律用 `sender_name`。同一发送人连续多条可省略重复署名。
-- **每条必须带发送时间**：若用表格呈现，**第一列固定是「时间」（发送时间，用 `HH:MM` 或 `M/D HH:MM`），不要用序号 `#`**；逐行格式则以 `[时间]` 开头。时间取 `message.msgtime`（毫秒）转本地时分。
+- **每条必须带发送时间（含日期）**：**直接用每条的 `time_local` 字段**（已是中国时区 UTC+8 的「YYYY-MM-DD HH:MM」，含日期）——**不要**自己拿 `message.msgtime` 转时区（易转成 UTC 差 8 小时），也不要用 `create_time`（那是入库时间，非发送时间）。若用表格，**第一列固定是「时间」**（放 `time_local`），不要用序号 `#`；逐行格式则以 `[time_local]` 开头。
 - 切勿输出「[图片]」「[表情 GIF]」「[发送了一张图片, N bytes]」这类**无链接占位**。
 
 ### 附件展示规则：<100MB 本地连接（并读取分析），>=100MB 网络连接，**别概括成 [图片]**
