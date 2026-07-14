@@ -211,7 +211,8 @@ function renderMarkdown(item) {
     return `[📎 ${fn}${sz}（点击从网络下载）](${item.network_url})`;
   }
   if (item.status === 'downloaded') {
-    return item.is_image ? `![${fn}](${item.local_path})` : `[📎 ${fn}（本地下载）](file://${item.local_path})`;
+    // 客户端内嵌 webview 无法加载本地/file:// 内联图片(![]() 会破图)，所以图片和文件一律只给「本地路径链接」，不内联。
+    return `[📎 ${fn}（本地${item.is_image ? '图片' : '文件'}）](file://${item.local_path})`;
   }
   return `~~${fn}（${item.status}）~~`;
 }
@@ -288,7 +289,7 @@ async function downloadGroupAttachments(args) {
     errors: results.filter((r) => r.status === 'error').length,
     inlined_images: inlined,
     items: results,
-    note: '图片用 render_markdown 内联展示；普通文件用 render_markdown 给本地下载链接；>=100MB 用 network_url 给网络下载链接。已内联的图片可直接读图分析。',
+    note: '图片和普通文件都用 render_markdown 给「本地路径链接」展示（[📎名](file://本地路径)），不要内联图片(![]()在客户端渲染不出来)；>=100MB 用 network_url 给网络下载链接。回传的图片内容仅供读图分析。',
   };
   return { summary, imageBlocks };
 }
@@ -304,7 +305,7 @@ function listDownloads(args) {
 const TOOLS = [
   {
     name: 'download_group_attachments',
-    description: '把某个微信群的附件（图片/视频/文件）直流下载到本机目录并返回本地路径；图片同时以图片内容回传供直接查看/分析。**>=100MB 不下载**，只回网络下载链接。每项含 render_markdown：图片→内联 ![]()、普通文件→本地下载链接、超限→网络下载链接。先用 wechat.list_groups 拿 room_id。',
+    description: '把某个微信群的附件（图片/视频/文件）直流下载到本机目录并返回本地路径；图片同时以图片内容回传供直接查看/分析。**>=100MB 不下载**，只回网络下载链接。每项含 render_markdown：图片和普通文件都→本地路径链接 [📎名](file://本地路径)（不内联图片，客户端渲染不了）、超限→网络下载链接。先用 wechat.list_groups 拿 room_id。',
     inputSchema: {
       type: 'object',
       properties: {

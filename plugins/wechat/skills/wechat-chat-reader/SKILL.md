@@ -48,6 +48,8 @@ allowed-tools: mcp__wechat__list_groups,mcp__wechat__get_group,mcp__wechat__get_
 
 ### 附件展示规则：图片和附件都**只显示文件路径**（不内联图片、不做网络预览）
 > 客户端是内嵌 webview，**无法加载本地路径 / `file://` 的内联图片**（`![]()` 会破图），网络直链是 http 也会被混合内容拦。所以图片和附件**一律只给「文件路径」**，让用户点开 / 在 Finder 打开即可，别试图在气泡里内联预览。
+>
+> ⚠️ **只要结果里有附件消息（哪怕只是「列出最近 N 条」、没让你分析），也必须先调用一次 `wechat-file.download_group_attachments(room_id)` 把附件下到本机**，再用它返回的 `render_markdown`（本地路径链接）展示该条——不要直接把 `attachment.file_name` 写成「发送了图片(xxx.jpg)」这种没有路径的占位。
 - **<100MB（图片/文件）→ 下到本机，显示本地文件路径**：先用 `wechat-file.download_group_attachments(room_id)` 下到本机拿本地路径：
   - **图片和文件一视同仁**，都用可点击的本地路径链接：`[📎 file_name](file://本地绝对路径)`，可再另起一行附上纯文本绝对路径便于复制。
   - **不要写内联图片 `![file_name](...)`**（本地路径 webview 加载不了、网络直链 http 被混合内容拦，都显示不出来，只会破图）。

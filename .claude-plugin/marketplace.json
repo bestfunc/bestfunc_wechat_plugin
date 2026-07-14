@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Bestfunc 微信聊天记录平台的 Claude Code plugin 市场。",
-    "version": "0.2.6"
+    "version": "0.2.7"
   },
   "plugins": [
     {
