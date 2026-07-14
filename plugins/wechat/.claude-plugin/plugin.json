@@ -1,7 +1,7 @@
 {
   "name": "wechat",
   "description": "微信聊天记录平台只读接入：基于用户 OAuth 授权，读取当前用户「有权限的微信群」的聊天消息、人员信息、附件（图片/视频）及群额外维护信息（备注/项目编号/项目名称/内外部/密级）。附带本地 wechat-file MCP：把附件下载到本机（>=100MB 跳过）、图片回传供分析。只读，不发送任何内容。安装后连接 MCP 并用 wxdevops 邮箱完成 OAuth 授权即可用。",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "author": {
     "name": "Bestfunc Technology",
     "email": "Great@bestfunc.com"
